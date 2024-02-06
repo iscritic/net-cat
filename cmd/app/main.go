@@ -7,27 +7,28 @@ import (
 )
 
 func main() {
-
 	var (
 		port    string
 		address string
 	)
 
-	flag.String("port", "8989", "Port to listen on")
-	flag.String("address", "localhost", "Address to listen on")
+	flag.StringVar(&port, "port", "8989", "Port to listen on")
+	flag.StringVar(&address, "address", "localhost", "Address to listen on")
 
 	flag.Parse()
 
 	lg := nc.NewLogger()
 
+	addr := address + ":" + port
+
 	// Start the server
-	listener, err := net.Listen("tcp", address+":"+port)
+	lg.InfoLog.Printf("Listening on the port %s...\n", addr)
+
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		lg.ErrorLog.Fatalln("Error starting server:", err)
 		return
 	}
 	defer listener.Close()
-
-	lg.InfoLog.Printf("Listening on the port %s...\n", address+":"+port)
 
 }
