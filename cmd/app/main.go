@@ -1,34 +1,85 @@
 package main
 
 import (
-	"flag"
-	nc "nc/pkg/logger"
+	"bufio"
 	"net"
+	"os"
+
+	nc "nc/pkg/logger"
 )
 
+var messages = make(chan string)
+var clients []net.Conn
+
 func main() {
-	var (
-		port    string
-		address string
-	)
-
-	flag.StringVar(&port, "port", "8989", "Port to listen on")
-	flag.StringVar(&address, "address", "localhost", "Address to listen on")
-
-	flag.Parse()
-
 	lg := nc.NewLogger()
 
-	addr := address + ":" + port
+	port := "8989"
 
-	// Start the server
-	lg.InfoLog.Printf("Listening on the port %s...\n", addr)
+	if len(os.Args) == 2 {
+		port = os.Args[1]
+	}
 
-	listener, err := net.Listen("tcp", addr)
+	lg.InfoLog.Printf("Listening on the port :%s\n", port)
+	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		lg.ErrorLog.Fatalln("Error starting server:", err)
-		return
+		lg.ErrorLog.Fatalf("Error starting server: %v", err)
 	}
 	defer listener.Close()
 
+	// Обработка входящих сообщений от клиентов
+	go broadcastMessages()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			lg.ErrorLog.Println("Error accepting connection:", err)
+			continue
+		}
+
+		clientAddr := conn.RemoteAddr().String()
+		lg.InfoLog.Printf("Client connected: %s\n", clientAddr)
+
+		// Добавляем клиента в список
+		clients = append(clients, conn)
+
+		// Обработка клиента в отдельной горутине
+		go handleConnection(conn)
+	}
+}
+
+// Функция для обработки входящих сообщений от клиентов
+func broadcastMessages() {
+	for {
+		// Получаем сообщение из канала
+		message := <-messages
+
+		// Отправляем сообщение всем клиентам
+		for _, client := range clients {
+			client.Write([]byte(message))
+		}
+	}
+}
+
+// Функция для обработки подключения клиента
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Приветствие нового клиента
+	conn.Write([]byte("Welcome to the chat!\n"))
+
+	// Бесконечный цикл для чтения сообщений от клиента
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		message := scanner.Text()
+
+		if message == "" {
+			continue
+		} else {
+			message = message + "\n"
+		}
+
+		// Отправляем сообщение в канал для рассылки другим клиентам
+		messages <- message
+	}
 }
