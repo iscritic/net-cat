@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	nc "nc/pkg/logger"
 )
@@ -40,7 +41,7 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 	go clientWriter(conn, ch)
 
 	// Запрос имени и регистрация клиента
-	conn.Write([]byte("Enter your name: "))
+	conn.Write([]byte("[ENTER YOUR NAME]: "))
 	name, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		lg.ErrorLog.Println("Error reading client name:", err)
@@ -50,7 +51,14 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 	name = strings.TrimSpace(name)
 
 	clients[conn] = &Client{name: name, ch: ch}
-	messages <- fmt.Sprintf("%s has joined the chat", name) // Уведомление о новом пользователе
+	messages <- fmt.Sprintf("%s has joined our chat", name) // Уведомление о новом пользователе
+
+	// Отправка истории сообщений новому клиенту
+	logMutex.Lock()
+	for _, msg := range messageLog {
+		ch <- msg
+	}
+	logMutex.Unlock()
 
 	// Чтение и отправка сообщений от клиента
 	scanner := bufio.NewScanner(conn)
@@ -59,7 +67,7 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 		if text == "" { // Пропускаем пустые сообщения
 			continue
 		}
-		messages <- fmt.Sprintf("[%s]: %s", name, text)
+		messages <- fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05"), name, text)
 	}
 
 	// Уведомление об отключении пользователя и его удаление из списка
