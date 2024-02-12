@@ -13,21 +13,22 @@ import (
 )
 
 var (
-	clients    = make(map[net.Conn]*Client) // Все подключенные клиенты
-	messages   = make(chan string)          // Все сообщения для рассылки, включая уведомления о подключении/отключении
-	messageLog = []string{}                 // История сообщений
-	logMutex   = sync.Mutex{}               // Mutex для безопасного доступа к истории сообщений
+	clients    = make(map[net.Conn]*Client)
+	messages   = make(chan string)
+	messageLog = []string{}
+	logMutex   = sync.Mutex{}
 )
 
 type Client struct {
 	name string
-	ch   chan string // канал отправки сообщений клиенту
+	ch   chan string
 }
 
-func broadcaster() {
+func broadcaster(lg *nc.Logger) {
 	for msg := range messages {
 		logMutex.Lock()
-		messageLog = append(messageLog, msg) // Сохраняем сообщение в истории
+		messageLog = append(messageLog, msg)
+		lg.ChatLog.Println(msg)
 		logMutex.Unlock()
 
 		for _, cli := range clients {
@@ -37,10 +38,15 @@ func broadcaster() {
 }
 
 func handleConnection(conn net.Conn, lg *nc.Logger) {
-	ch := make(chan string) // канал исходящих сообщений для клиента
+	ch := make(chan string)
 	go clientWriter(conn, ch)
 
-	// Запрос имени и регистрация клиента
+	wlcmsg, err := os.ReadFile("hello.txt")
+	if err != nil {
+		lg.ErrorLog.Println("Error reading file:", err)
+	}
+	conn.Write([]byte(wlcmsg))
+
 	conn.Write([]byte("[ENTER YOUR NAME]: "))
 	name, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
@@ -51,28 +57,26 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 	name = strings.TrimSpace(name)
 
 	clients[conn] = &Client{name: name, ch: ch}
-	messages <- fmt.Sprintf("%s has joined our chat", name) // Уведомление о новом пользователе
+	messages <- fmt.Sprintf("%s has joined our chat", name)
 
-	// Отправка истории сообщений новому клиенту
 	logMutex.Lock()
 	for _, msg := range messageLog {
 		ch <- msg
 	}
 	logMutex.Unlock()
 
-	// Чтение и отправка сообщений от клиента
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		text := scanner.Text()
-		if text == "" { // Пропускаем пустые сообщения
+		if text == "" {
 			continue
 		}
 		messages <- fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05"), name, text)
 	}
 
-	// Уведомление об отключении пользователя и его удаление из списка
 	delete(clients, conn)
 	messages <- fmt.Sprintf("%s has left the chat", name)
+	lg.InfoLog.Printf("Client disconnected: %s\n", conn.RemoteAddr().String())
 	conn.Close()
 }
 
@@ -90,6 +94,11 @@ func main() {
 		port = os.Args[1]
 	}
 
+	if len(os.Args) > 2 {
+		fmt.Println("[USAGE]: ./cmd/tcp-chat/ $port")
+		return
+	}
+
 	lg.InfoLog.Printf("Listening on the port :%s\n", port)
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
@@ -97,14 +106,17 @@ func main() {
 	}
 	defer listener.Close()
 
-	go broadcaster()
+	go broadcaster(lg)
 
-	for {
+	for len(clients) < 20 {
 		conn, err := listener.Accept()
 		if err != nil {
 			lg.ErrorLog.Println("Error accepting connection:", err)
 			continue
 		}
+
+		clientAddr := conn.RemoteAddr().String()
+		lg.InfoLog.Printf("Client connected: %s\n", clientAddr)
 
 		go handleConnection(conn, lg)
 	}
