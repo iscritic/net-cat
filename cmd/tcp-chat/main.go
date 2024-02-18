@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -12,38 +14,47 @@ import (
 	nc "nc/pkg/logger"
 )
 
+// Определение структуры для сообщения
+type Message struct {
+	Name string // Имя отправителя
+	Text string // Текст сообщения
+}
+
 var (
-	clients    = make(map[net.Conn]*Client)
-	messages   = make(chan string)
+	clients    = make(map[string]net.Conn)
+	messages   = make(chan Message) // Обновлен канал для передачи структуры Message
 	messageLog = []string{}
 	logMutex   = sync.Mutex{}
 )
 
-type Client struct {
-	name string
-	ch   chan string
+var colors = map[int]string{
+	0: "\033[0m",
+	1: "\033[31m",
+	2: "\033[32m",
+	3: "\033[33m",
+	4: "\033[34m",
+	5: "\033[35m",
+	6: "\033[36m",
 }
 
-func broadcaster(lg *nc.Logger) {
+func broadcaster() {
 	for msg := range messages {
 		logMutex.Lock()
-		messageLog = append(messageLog, msg)
-		lg.ChatLog.Println(msg)
+		messageLog = append(messageLog, msg.Text)
 		logMutex.Unlock()
 
-		for _, cli := range clients {
-			cli.ch <- msg
+		for clientName, conn := range clients {
+			if clientName != msg.Name { // Исключить отправителя
+				fmt.Fprintln(conn, msg.Text)
+			}
 		}
 	}
 }
 
 func handleConnection(conn net.Conn, lg *nc.Logger) {
-	ch := make(chan string)
-	go clientWriter(conn, ch)
-
 	wlcmsg, err := os.ReadFile("hello.txt")
 	if err != nil {
-		lg.ErrorLog.Println("Error reading file:", err)
+		lg.ErrorLog.Println("Error reading welcome message file:", err)
 	}
 	conn.Write([]byte(wlcmsg))
 
@@ -54,36 +65,76 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 		conn.Close()
 		return
 	}
-	name = strings.TrimSpace(name)
 
-	clients[conn] = &Client{name: name, ch: ch}
-	messages <- fmt.Sprintf("%s has joined our chat", name)
+	name = strings.TrimSpace(name)
+	if !isValidNickname(name) {
+		conn.Write([]byte("Your name must contain at least 2, and less than 15 characters\n"))
+		conn.Write([]byte("The name must contain only letters and digits\n"))
+		conn.Close()
+		return
+	}
+
+	logMutex.Lock()
+	if _, exists := clients[name]; exists {
+		conn.Write([]byte("This name is already taken. Please reconnect with a different name.\n"))
+		conn.Close()
+		logMutex.Unlock()
+		return
+	}
+
+	name = ColorfulNickname(name)
+	clients[name] = conn
+	logMutex.Unlock()
+
+	messages <- Message{Name: name, Text: fmt.Sprintf("\n%s has joined our chat", name)}
 
 	logMutex.Lock()
 	for _, msg := range messageLog {
-		ch <- msg
+		conn.Write([]byte(msg + "\n"))
 	}
 	logMutex.Unlock()
 
 	scanner := bufio.NewScanner(conn)
+	conn.Write([]byte(fmt.Sprintf("[%s][%s]:(1) ", time.Now().Format("2006-01-02 15:04:05"), name)))
+
 	for scanner.Scan() {
+		conn.Write([]byte(fmt.Sprintf("[%s][%s]: ", time.Now().Format("2006-01-02 15:04:05"), name)))
+
 		text := scanner.Text()
+		if text != "" {
+			messages <- Message{Name: name, Text: fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05"), name, text)}
+		}
+
 		if text == "" {
 			continue
 		}
-		messages <- fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05"), name, text)
 	}
 
-	delete(clients, conn)
-	messages <- fmt.Sprintf("%s has left the chat", name)
+	if err := scanner.Err(); err != nil {
+		lg.ErrorLog.Println("Error reading from client:", err)
+	}
+
+	logMutex.Lock()
+	delete(clients, name)
+	logMutex.Unlock()
+
+	messages <- Message{Text: fmt.Sprintf("\n%s has left the chat", name)}
 	lg.InfoLog.Printf("Client disconnected: %s\n", conn.RemoteAddr().String())
 	conn.Close()
 }
 
-func clientWriter(conn net.Conn, ch <-chan string) {
-	for msg := range ch {
-		fmt.Fprintln(conn, msg)
+func isValidNickname(name string) bool {
+	re := regexp.MustCompile(`^\w{2,15}$`)
+	return re.MatchString(name)
+}
+
+func ColorfulNickname(name string) string {
+	diceRoll := rand.Intn(len(colors)-1) + 1
+	colorCode, exists := colors[diceRoll]
+	if !exists {
+		return name
 	}
+	return colorCode + name + colors[0]
 }
 
 func main() {
@@ -93,9 +144,8 @@ func main() {
 	if len(os.Args) == 2 {
 		port = os.Args[1]
 	}
-
 	if len(os.Args) > 2 {
-		fmt.Println("[USAGE]: ./cmd/tcp-chat/ $port")
+		fmt.Println("[USAGE]: ./tcp-chat $port")
 		return
 	}
 
@@ -106,17 +156,15 @@ func main() {
 	}
 	defer listener.Close()
 
-	go broadcaster(lg)
+	go broadcaster()
 
-	for len(clients) < 20 {
+	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			lg.ErrorLog.Println("Error accepting connection:", err)
 			continue
 		}
-
-		clientAddr := conn.RemoteAddr().String()
-		lg.InfoLog.Printf("Client connected: %s\n", clientAddr)
+		lg.InfoLog.Printf("Client connected: %s\n", conn.RemoteAddr().String())
 
 		go handleConnection(conn, lg)
 	}
