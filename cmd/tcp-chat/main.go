@@ -14,15 +14,15 @@ import (
 	nc "nc/pkg/logger"
 )
 
-// Определение структуры для сообщения
 type Message struct {
-	Name string // Имя отправителя
-	Text string // Текст сообщения
+	ID   string
+	Name string
+	Text string
 }
 
 var (
 	clients    = make(map[string]net.Conn)
-	messages   = make(chan Message) // Обновлен канал для передачи структуры Message
+	messages   = make(chan Message)
 	messageLog = []string{}
 	logMutex   = sync.Mutex{}
 )
@@ -44,54 +44,64 @@ func broadcaster() {
 		logMutex.Unlock()
 
 		for clientName, conn := range clients {
-			if clientName != msg.Name { // Исключить отправителя
-				fmt.Fprintln(conn, msg.Text)
+			if clientName != msg.ID {
+				fmt.Fprint(conn, msg.Text)
 			}
 		}
 	}
 }
 
 func handleConnection(conn net.Conn, lg *nc.Logger) {
-	wlcmsg, err := os.ReadFile("hello.txt")
+	welcomeMessage, err := os.ReadFile("hello.txt")
 	if err != nil {
 		lg.ErrorLog.Println("Error reading welcome message file:", err)
 	}
-	conn.Write([]byte(wlcmsg))
+	conn.Write(welcomeMessage)
 
 	conn.Write([]byte("[ENTER YOUR NAME]: "))
-	name, err := bufio.NewReader(conn).ReadString('\n')
+	login, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		lg.ErrorLog.Println("Error reading client name:", err)
 		conn.Close()
 		return
 	}
 
-	name = strings.TrimSpace(name)
-	if !isValidNickname(name) {
-		conn.Write([]byte("Your name must contain at least 2, and less than 15 characters\n"))
-		conn.Write([]byte("The name must contain only letters and digits\n"))
+	login = strings.TrimSpace(login)
+	if !isValidNickname(login) {
+		conn.Write([]byte("Your name must contain at least 2, and less than 15 characters\nThe name must contain only letters and digits\n"))
 		conn.Close()
 		return
 	}
 
 	logMutex.Lock()
-	if _, exists := clients[name]; exists {
+	if _, exists := clients[login]; exists {
 		conn.Write([]byte("This name is already taken. Please reconnect with a different name.\n"))
 		conn.Close()
 		logMutex.Unlock()
 		return
 	}
 
-	name = ColorfulNickname(name)
-	clients[name] = conn
+	name := ColorfulNickname(login)
+	clients[login] = conn
 	logMutex.Unlock()
 
-	messages <- Message{Name: name, Text: fmt.Sprintf("\n%s has joined our chat", name)}
+	messages <- Message{ID: login, Text: fmt.Sprintf("\n%s has joined our chat", name)}
 
 	logMutex.Lock()
-	for _, msg := range messageLog {
-		conn.Write([]byte(msg + "\n"))
+
+	for i, msg := range messageLog {
+
+		if i == 1 {
+			conn.Write([]byte(strings.TrimSpace(msg)))
+			continue
+		}
+
+		if i == len(messageLog)-1 {
+			conn.Write([]byte(msg + "\n"))
+		}
+
 	}
+
 	logMutex.Unlock()
 
 	scanner := bufio.NewScanner(conn)
@@ -101,13 +111,16 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 		conn.Write([]byte(fmt.Sprintf("[%s][%s]: ", time.Now().Format("2006-01-02 15:04:05"), name)))
 
 		text := scanner.Text()
-		if text != "" {
-			messages <- Message{Name: name, Text: fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05"), name, text)}
-		}
 
-		if text == "" {
+		if isANSIMessage(text) {
+			conn.Write([]byte("\nThis message contain ANSI symbols :("))
 			continue
 		}
+
+		if text != "" {
+			messages <- Message{ID: login, Text: fmt.Sprintf("\n[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05"), name, text)}
+		}
+
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -126,6 +139,15 @@ func handleConnection(conn net.Conn, lg *nc.Logger) {
 func isValidNickname(name string) bool {
 	re := regexp.MustCompile(`^\w{2,15}$`)
 	return re.MatchString(name)
+}
+
+func isANSIMessage(msg string) bool {
+	for _, r := range msg {
+		if r == '\x1B' {
+			return true
+		}
+	}
+	return false
 }
 
 func ColorfulNickname(name string) string {
@@ -164,6 +186,12 @@ func main() {
 			lg.ErrorLog.Println("Error accepting connection:", err)
 			continue
 		}
+
+		if len(clients) > 10 {
+			conn.Write([]byte("limits of users is reached, try again later"))
+			conn.Close()
+		}
+
 		lg.InfoLog.Printf("Client connected: %s\n", conn.RemoteAddr().String())
 
 		go handleConnection(conn, lg)
